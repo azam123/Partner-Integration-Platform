@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Partner Integration Platform
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        APP_NAMESPACE: PartnerIntegration
+        DB_PORT: 5432
+
+Resources:
+  IngressQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: partner-ingress-queue
+      VisibilityTimeout: 60
+
+  DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: partner-dlq
+
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: ingest_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt IngressQueue.QueueName
+      Environment:
+        Variables:
+          INGRESS_QUEUE_URL: !Ref IngressQueue
+          DLQ_URL: !Ref DLQ
+      Events:
+        ScheduledPoll:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+
+  RouterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: router_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt DLQ.QueueName
+      Environment:
+        Variables:
+          INGRESS_QUEUE_URL: !Ref IngressQueue
+          DLQ_URL: !Ref DLQ
+      Events:
+        IngressSQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngressQueue.Arn
+            BatchSize: 10
+
+  DLQMonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: dlq_handler.lambda_handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          INGRESS_QUEUE_URL: !Ref IngressQueue
+          DLQ_URL: !Ref DLQ
+      Events:
+        DLQEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DLQ.Arn
+            BatchSize: 10
+
+  DLQBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: partner-dlq-backlog
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DLQ.QueueName
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  IngressQueueUrl:
+    Value: !Ref IngressQueue
+  DLQUrl:
+    Value: !Ref DLQ
